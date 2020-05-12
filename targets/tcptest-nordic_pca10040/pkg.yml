@@ -1,4 +1,4 @@
-pkg.name: "targets/tcptest_oic-nordic_pca10040"
+pkg.name: "targets/tcptest-nordic_pca10040"
 pkg.type: target
 pkg.description: 
 pkg.author: 
