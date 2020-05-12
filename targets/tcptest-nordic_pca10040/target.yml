@@ -1,0 +1,3 @@
+target.app: "@mynewtstuff/apps/tcptest"
+target.bsp: "@apache-mynewt-core/hw/bsp/nordic_pca10040"
+target.build_profile: "debug"
