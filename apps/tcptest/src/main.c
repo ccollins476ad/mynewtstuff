@@ -29,7 +29,6 @@
 #endif
 
 #include "mn_socket/mn_socket.h"
-#include "tcpser/tcpser.h"
 
 /* Task 1 */
 #define TASK1_PRIO (8)
@@ -53,15 +52,13 @@ static int g_led_pin;
 
 static struct mn_socket *sock;
 
-static uint8_t prevrx[4096];
-static int prevrxlen;
-static uint8_t curidx;
-static int totalrx;
-static bool started;
-
 void
 sock_readable(void *cb_arg, int err)
 {
+    static uint8_t curidx;
+    static int totalrx;
+    static bool started;
+
     struct os_mbuf *cur;
     struct os_mbuf *om;
     uint8_t val;
@@ -81,7 +78,6 @@ sock_readable(void *cb_arg, int err)
             }
 
             if (started) {
-                //console_printf("0x%02x\n", val);
                 if (val != curidx) {
                     console_printf("BAD: [%d] have=0x%02x want=0x%02x\n", totalrx, val, curidx);
                 }
@@ -92,9 +88,6 @@ sock_readable(void *cb_arg, int err)
     }
 
     console_printf("%d\n", totalrx);
-
-    os_mbuf_copydata(om, 0, OS_MBUF_PKTLEN(om), prevrx);
-    prevrxlen = OS_MBUF_PKTLEN(om);
 
     os_mbuf_free_chain(om);
 }
@@ -238,12 +231,6 @@ main(int argc, char **argv)
 #endif
 
     sysinit();
-
-    rc = tsuart_init();
-    assert(rc == 0);
-
-    rc = tcpser_init();
-    assert(rc == 0);
 
     init_tasks();
 

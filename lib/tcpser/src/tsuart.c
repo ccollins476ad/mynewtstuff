@@ -1,6 +1,6 @@
 #include "os/mynewt.h"
 #include "uart/uart.h"
-#include "local.h"
+#include "tcpser_priv.h"
 
 #define TSUART_TX_BUF_SZ   32
 #define TSUART_RX_BUF_SZ   128

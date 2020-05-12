@@ -4,3 +4,6 @@ pkg.type: lib
 pkg.deps:
     - "@apache-mynewt-core/kernel/os"
     - "@apache-mynewt-core/net/ip/mn_socket"
+
+pkg.init:
+    tcpser_init: 900

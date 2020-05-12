@@ -2,7 +2,7 @@
 #include "mn_socket/mn_socket.h"
 #include "mn_socket/mn_socket_ops.h"
 #include "base64/base64.h"
-#include "local.h"
+#include "tcpser_priv.h"
 
 STAILQ_HEAD(, os_mbuf_pkthdr) tcpser_rxq = STAILQ_HEAD_INITIALIZER(tcpser_rxq);
 
@@ -330,20 +330,14 @@ tcpser_rx_pkt(struct os_mbuf *om)
     }
 }
 
-int
+void
 tcpser_init(void)
 {
     int rc;
 
     rc = mn_socket_ops_reg(&tcpser_ops);
-    if (rc != 0) {
-        return -1;
-    }
+    SYSINIT_PANIC_ASSERT(rc == 0);
 
     rc = os_mutex_init(&tcpser_mtx);
-    if (rc != 0) {
-        return -1;
-    }
-
-    return 0;
+    SYSINIT_PANIC_ASSERT(rc == 0);
 }
