@@ -96,16 +96,11 @@ union mn_socket_cb sock_cbs = {
     .socket.readable = sock_readable,
 };
 
-static char req_str[2048];
-
 void
 task1_handler(void *arg)
 {
-    //const char *addr = "52.178.197.1";
-    //const char *addr = "45.56.79.23";
     const char *addr = "127.0.0.1";
-    //const uint16_t port = 80;
-    const uint16_t port = 666;
+    const uint16_t port = 777;
 
     struct os_task *t;
     int rc;
@@ -134,23 +129,6 @@ task1_handler(void *arg)
     rc = mn_connect(sock, (struct mn_sockaddr *)&sin);
     assert(rc == 0);
     console_printf("connected to %s\n", addr);
-
-    struct os_mbuf *om = os_msys_get_pkthdr(0, 0);
-    assert(om != NULL);
-
-    rc = snprintf(req_str, sizeof req_str,
-                  "GET /files/25525/25525-h/25525-h.htm HTTP/1.1\r\n"
-                  "Host: %s\r\n"
-                  "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:75.0) Gecko/20100101 Firefox/75.0\r\n"
-                  "Accept-Encoding: gzip\r\n\r\n",
-                  addr);
-    assert(rc < sizeof req_str);
-
-    rc = os_mbuf_append(om, req_str, rc);
-    assert(rc == 0);
-
-    rc = mn_sendto(sock, om, NULL);
-    assert(rc == 0);
 
     while (1) {
         t = os_sched_get_current_task();
