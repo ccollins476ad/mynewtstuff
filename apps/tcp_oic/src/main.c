@@ -17,6 +17,8 @@
  * under the License.
  */
 
+#define TCP_OIC_LISTEN
+
 #include "os/mynewt.h"
 #include <bsp/bsp.h>
 #include <hal/hal_gpio.h>
@@ -31,6 +33,7 @@
 #include "mn_socket/mn_socket.h"
 #include "oic/port/mynewt/tcp4.h"
 #include "oic/oc_api.h"
+#include "tcpser/tcpser.h"
 
 /* Task 1 */
 #define TASK1_PRIO (8)
@@ -38,50 +41,97 @@
 static os_stack_t task1_stack[TASK1_STACK_SIZE];
 static struct os_task task1;
 static volatile int g_task1_loops;
+static struct os_eventq task1_evq;
 
 /* For LED toggling */
 static int g_led_pin;
 
-static struct mn_socket *sock;
+static struct mn_socket *tcp_oic_sock;
+#ifdef TCP_OIC_LISTEN
+static struct mn_socket *tcp_oic_listener;
+#endif
+
+static void tcp_oic_writable(void *cb_arg, int err);
+static int tcp_oic_newconn(void *cb_arg, struct mn_socket *new);
+
+#ifdef TCP_OIC_LISTEN
+static void tcp_oic_listen(struct os_event *ev);
+#endif
+
+static struct os_event tcp_oic_ev_listen = {
+    .ev_cb = tcp_oic_listen,
+};
+
+union mn_socket_cb tcp_oic_sock_cbs = {
+    .socket.writable = tcp_oic_writable,
+};
+
+union mn_socket_cb tcp_oic_listener_cbs = {
+    .listen.newconn = tcp_oic_newconn,
+};
 
 static void
 on_conn_err(struct mn_socket *s, int status, void *arg)
 {
     console_printf("on_conn_err: status=%d\n", status);
-    assert(s == sock);
+    assert(s == tcp_oic_sock);
+
+#ifdef TCP_OIC_LISTEN
+    os_eventq_put(os_eventq_dflt_get(), &tcp_oic_ev_listen);
+#endif
 }
 
 static void
-sock_writable(void *cb_arg, int err)
+tcp_oic_writable(void *cb_arg, int err)
 {
     int rc;
 
-    rc = oc_tcp4_add_conn(sock, on_conn_err, NULL);
+    rc = oc_tcp4_add_conn(tcp_oic_sock, on_conn_err, NULL);
     assert(rc == 0);
 }
 
-union mn_socket_cb sock_cbs = {
-    .socket.readable = NULL,
-    .socket.writable = sock_writable,
-};
-
-static void
-task1_handler(void *arg)
+static int
+tcp_oic_newconn(void *cb_arg, struct mn_socket *new)
 {
-    const char *addr = "127.0.0.1";
-    const uint16_t port = 777;
-
-    struct os_task *t;
     int rc;
 
-    /* Set the led pin for the E407 devboard */
-    g_led_pin = LED_BLINK_PIN;
-    hal_gpio_init_out(g_led_pin, 1);
+    assert(tcp_oic_sock == NULL); tcp_oic_sock = new; 
+    tcp_oic_sock->ms_cbs = &tcp_oic_sock_cbs;
 
-    rc = mn_socket(&sock, MN_PF_INET, MN_SOCK_STREAM, 0);
+    rc = oc_tcp4_add_conn(tcp_oic_sock, on_conn_err, NULL);
     assert(rc == 0);
 
-    sock->ms_cbs = &sock_cbs;
+    return 0;
+}
+
+static void
+tcp_oic_close_all(void)
+{
+    if (tcp_oic_listener != NULL) {
+        mn_close(tcp_oic_listener);
+        tcp_oic_listener = NULL;
+    }
+
+    if (tcp_oic_sock != NULL) {
+        //oc_tcp4_del_conn(tcp_oic_sock);
+        mn_close(tcp_oic_sock);
+        tcp_oic_sock = NULL;
+    }
+}
+
+#ifndef TCP_OIC_LISTEN
+static void
+tcp_oic_connect(void)
+{
+    const char *addr = "54.202.65.55";
+    const uint16_t port = 8081;
+
+    int rc;
+
+    rc = mn_socket(&tcp_oic_sock, MN_PF_INET, MN_SOCK_STREAM, 0);
+    assert(rc == 0);
+
+    tcp_oic_sock->ms_cbs = &tcp_oic_sock_cbs;
 
     struct mn_sockaddr_in sin = {
         .msin_len = sizeof (struct mn_sockaddr_in),
@@ -92,21 +142,39 @@ task1_handler(void *arg)
     rc = mn_inet_pton(MN_PF_INET, addr, &sin.msin_addr);
     assert(rc == 1);
 
-    mn_close(sock);
-
     console_printf("connecting to %s\n", addr);
-    rc = mn_connect(sock, (struct mn_sockaddr *)&sin);
+    rc = mn_connect(tcp_oic_sock, (struct mn_sockaddr *)&sin);
     assert(rc == 0);
     console_printf("connected to %s\n", addr);
+}
+#else
+static void
+tcp_oic_listen(struct os_event *ev)
+{
+    int rc;
+
+    tcp_oic_close_all();
+
+    rc = mn_socket(&tcp_oic_listener, MN_PF_INET, MN_SOCK_STREAM, 0);
+    assert(rc == 0);
+    tcp_oic_listener->ms_cbs = &tcp_oic_listener_cbs;
+
+    console_printf("listening\n");
+    rc = mn_listen(tcp_oic_listener, 0);
+    assert(rc == 0);
+    console_printf("listen successful\n");
+}
+#endif
+
+static void
+task1_handler(void *arg)
+{
+    /* Set the led pin for the E407 devboard */
+    g_led_pin = LED_BLINK_PIN;
+    hal_gpio_init_out(g_led_pin, 1);
 
     while (1) {
-        t = os_sched_get_current_task();
-        assert(t->t_func == task1_handler);
-
-        ++g_task1_loops;
-
-        /* Wait one second */
-        os_time_delay(OS_TICKS_PER_SEC);
+        os_eventq_run(&task1_evq);
     }
 }
 
@@ -143,10 +211,22 @@ main(int argc, char **argv)
 
     sysinit();
 
+    os_eventq_init(&task1_evq);
+
     os_task_init(&task1, "task1", task1_handler, NULL,
             TASK1_PRIO, OS_WAIT_FOREVER, task1_stack, TASK1_STACK_SIZE);
 
     oc_main_init((oc_handler_t *)&omgr_oc_handler);
+
+    tsuart_evq_set(&task1_evq);
+
+    tcpser_reset();
+
+#ifdef TCP_OIC_LISTEN
+    tcp_oic_listen(NULL);
+#else
+    tcp_oic_connect();
+#endif
 
     while (1) {
         os_eventq_run(os_eventq_dflt_get());

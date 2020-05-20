@@ -2,6 +2,7 @@
 #include "mn_socket/mn_socket.h"
 #include "mn_socket/mn_socket_ops.h"
 #include "base64/base64.h"
+#include "console/console.h"
 #include "tcpser_priv.h"
 
 STAILQ_HEAD(, os_mbuf_pkthdr) tcpser_rxq = STAILQ_HEAD_INITIALIZER(tcpser_rxq);
@@ -20,19 +21,55 @@ static struct mn_socket *tcpser_sock;
 static struct mn_socket *tcpser_listener;
 
 static void
+tcpser_lock_op(void)
+{
+    int rc;
+
+    rc = os_mutex_pend(&tcpser_op_mtx, OS_WAIT_FOREVER);
+    assert(rc == 0);
+}
+
+static void
+tcpser_unlock_op(void)
+{
+    int rc;
+
+    rc = os_mutex_release(&tcpser_op_mtx);
+    assert(rc == 0);
+}
+
+static void
+tcpser_lock_state(void)
+{
+    int rc;
+
+    rc = os_mutex_pend(&tcpser_state_mtx, OS_WAIT_FOREVER);
+    assert(rc == 0);
+}
+
+static void
+tcpser_unlock_state(void)
+{
+    int rc;
+
+    rc = os_mutex_release(&tcpser_state_mtx);
+    assert(rc == 0);
+}
+
+static void
 tcpser_start_op(int *status)
 {
-    os_mutex_pend(&tcpser_op_mtx, OS_WAIT_FOREVER);
+    tcpser_lock_op();
 
-    os_mutex_pend(&tcpser_state_mtx, OS_WAIT_FOREVER);
+    tcpser_lock_state();
     tcpser_block_rc = status;
-    os_mutex_release(&tcpser_state_mtx);
+    tcpser_unlock_state();
 }
 
 static void
 tcpser_end_op(void)
 {
-    os_mutex_release(&tcpser_op_mtx);
+    tcpser_unlock_op();
 }
 
 static bool
@@ -40,9 +77,9 @@ tcpser_op_is_active(void)
 {
     bool active;
 
-    os_mutex_pend(&tcpser_state_mtx, OS_WAIT_FOREVER);
+    tcpser_lock_state();
     active = tcpser_block_rc != NULL;
-    os_mutex_release(&tcpser_state_mtx);
+    tcpser_unlock_state();
 
     return active;
 }
@@ -50,44 +87,42 @@ tcpser_op_is_active(void)
 static void
 tcpser_block(void)
 {
+    int rc;
+
     assert(tcpser_op_is_active());
-    os_sem_pend(&tcpser_block_sem, OS_WAIT_FOREVER);
+
+    rc = os_sem_pend(&tcpser_block_sem, OS_WAIT_FOREVER);
+    assert(rc == 0);
 }
 
 static void
 tcpser_unblock(int status)
 {
-    os_mutex_pend(&tcpser_state_mtx, OS_WAIT_FOREVER);
+    int rc;
+
+    tcpser_lock_state();
 
     if (tcpser_block_rc != NULL) {
         *tcpser_block_rc = status;
         tcpser_block_rc = NULL;
 
-        os_sem_release(&tcpser_block_sem);
+        rc = os_sem_release(&tcpser_block_sem);
+        assert(rc == 0);
     }
 
-    os_mutex_release(&tcpser_state_mtx);
-
-    tcpser_end_op();
+    tcpser_unlock_state();
 }
 
 static int
 tcpser_create(struct mn_socket **sock, uint8_t domain, uint8_t type,
               uint8_t protocol)
 {
-    int rc;
-
     if (domain != MN_PF_INET) {
         return MN_EAFNOSUPPORT;
     }
 
     if (type != MN_SOCK_STREAM) {
         return MN_EPROTONOSUPPORT;
-    }
-
-    rc = tsuart_init();
-    if (rc != 0) {
-        return MN_EUNKNOWN;
     }
 
     *sock = os_memblock_get(&tcpser_sock_pool);
@@ -102,26 +137,34 @@ static int
 tcpser_close(struct mn_socket *sock)
 {
     static const char *str = "disconnect\n";
+    bool is_sock;
     int rc;
 
     tcpser_start_op(&rc);
 
-    tsuart_write(str, strlen(str));
-    tcpser_block();
-
-    os_mutex_pend(&tcpser_state_mtx, OS_WAIT_FOREVER);
+    tcpser_lock_state();
 
     if (sock == tcpser_sock) {
-        tcpser_sock = NULL;
-    } else if (sock == tcpser_listener) {
-        tcpser_listener = NULL;
+        is_sock = true;
     } else {
-        assert(0);
+        assert(sock == tcpser_listener);
     }
+
+    tcpser_unlock_state();
+
+    if (is_sock) {
+        tsuart_write(str, strlen(str));
+        tcpser_sock = NULL;
+    } else {
+        tsuart_write("stop-listen\n", 12);
+        tcpser_listener = NULL;
+    }
+
+    tcpser_block();
 
     os_memblock_put(&tcpser_sock_pool, sock);
 
-    os_mutex_release(&tcpser_state_mtx);
+    tcpser_end_op();
 
     return rc;
 }
@@ -157,12 +200,12 @@ tcpser_connect(struct mn_socket *sock, struct mn_sockaddr *addr)
         return MN_EINVAL;
     }
 
-    os_mutex_pend(&tcpser_state_mtx, OS_WAIT_FOREVER);
+    tcpser_lock_state();
     already = tcpser_sock != NULL || tcpser_listener != NULL;
     if (!already) {
         tcpser_sock = sock;
     }
-    os_mutex_release(&tcpser_state_mtx);
+    tcpser_unlock_state();
 
     if (already) {
         return MN_ENOBUFS;
@@ -179,10 +222,12 @@ tcpser_connect(struct mn_socket *sock, struct mn_sockaddr *addr)
     tcpser_block();
 
     if (rc != 0) {
-        os_mutex_pend(&tcpser_state_mtx, OS_WAIT_FOREVER);
+        tcpser_lock_state();
         tcpser_sock = NULL;
-        os_mutex_release(&tcpser_state_mtx);
+        tcpser_unlock_state();
     }
+
+    tcpser_end_op();
 
     mn_socket_writable(sock, rc);
     return rc;
@@ -194,12 +239,12 @@ tcpser_listen(struct mn_socket *sock, uint8_t qlen)
     bool already;
     int rc;
 
-    os_mutex_pend(&tcpser_state_mtx, OS_WAIT_FOREVER);
+    tcpser_lock_state();
     already = tcpser_sock != NULL || tcpser_listener != NULL;
     if (!already) {
         tcpser_listener = sock;
     }
-    os_mutex_release(&tcpser_state_mtx);
+    tcpser_unlock_state();
 
     if (already) {
         return MN_ENOBUFS;
@@ -207,14 +252,16 @@ tcpser_listen(struct mn_socket *sock, uint8_t qlen)
 
     tcpser_start_op(&rc);
 
-    tsuart_write("listen\n", 7);
+    tsuart_write("listen 666\n", 11);
     tcpser_block();
 
     if (rc != 0) {
-        os_mutex_pend(&tcpser_state_mtx, OS_WAIT_FOREVER);
+        tcpser_lock_state();
         tcpser_listener = NULL;
-        os_mutex_release(&tcpser_state_mtx);
+        tcpser_unlock_state();
     }
+
+    tcpser_end_op();
 
     return rc;
 }
@@ -255,6 +302,8 @@ tcpser_sendto(struct mn_socket *sock, struct os_mbuf *om, struct mn_sockaddr *to
 
     tcpser_block();
 
+    tcpser_end_op();
+
     return rc;
 }
 
@@ -265,14 +314,14 @@ tcpser_recvfrom(struct mn_socket *sock, struct os_mbuf **om, struct mn_sockaddr 
 
     // XXX: Check connected state.
 
-    os_mutex_pend(&tcpser_state_mtx, OS_WAIT_FOREVER);
+    tcpser_lock_state();
 
     omp = STAILQ_FIRST(&tcpser_rxq);
     if (omp != NULL) {
         STAILQ_REMOVE_HEAD(&tcpser_rxq, omp_next);
     }
 
-    os_mutex_release(&tcpser_state_mtx);
+    tcpser_unlock_state();
 
     if (omp == NULL) {
         return MN_EAGAIN;
@@ -335,6 +384,35 @@ static const struct mn_socket_ops tcpser_ops = {
 };
 
 static void
+tcpser_rx_accept(void)
+{
+    int rc;
+
+    tcpser_lock_state();
+
+    assert(tcpser_sock == NULL);
+
+    rc = mn_socket(&tcpser_sock, MN_PF_INET, MN_SOCK_STREAM, 0);
+    assert(rc == 0);
+
+    tcpser_unlock_state();
+
+    mn_socket_newconn(tcpser_listener, tcpser_sock);
+}
+
+static void
+tcpser_rx_close(void)
+{
+    tcpser_lock_state();
+
+    if (tcpser_sock != NULL) {
+        mn_socket_readable(tcpser_sock, MN_ECONNABORTED);
+    }
+
+    tcpser_unlock_state();
+}
+
+static void
 tcpser_rx_data(struct os_mbuf *om)
 {
     struct base64_decoder dec;
@@ -364,11 +442,11 @@ tcpser_rx_data(struct os_mbuf *om)
         omp->omp_len -= delta;
     }
 
-    os_mutex_pend(&tcpser_state_mtx, OS_WAIT_FOREVER);
+    tcpser_lock_state();
 
     STAILQ_INSERT_TAIL(&tcpser_rxq, omp, omp_next);
 
-    os_mutex_release(&tcpser_state_mtx);
+    tcpser_unlock_state();
 
     mn_socket_readable(tcpser_sock, 0);
 }
@@ -390,6 +468,8 @@ tcpser_rx_pkt(struct os_mbuf *om)
         cmdlen = om->om_len;
     }
 
+    console_printf("cmd=%*s\n", cmdlen, cmdstr);
+
     if (strncmp(cmdstr, "ack", cmdlen) == 0) {
         tcpser_unblock(0);
         os_mbuf_free_chain(om);
@@ -407,6 +487,31 @@ tcpser_rx_pkt(struct os_mbuf *om)
         tcpser_rx_data(om);
         return;
     }
+
+    if (strncmp(cmdstr, "accept", cmdlen) == 0) {
+        tcpser_rx_accept();
+        return;
+    }
+
+    if (strncmp(cmdstr, "close", cmdlen) == 0) {
+        tcpser_rx_close();
+        return;
+    }
+}
+
+int
+tcpser_reset(void)
+{
+    int rc;
+
+    tcpser_start_op(&rc);
+
+    tsuart_write("reset\n", 6);
+    tcpser_block();
+
+    tcpser_end_op();
+
+    return rc;
 }
 
 void
@@ -426,5 +531,8 @@ tcpser_init(void)
     rc = os_mempool_init(&tcpser_sock_pool, 2,
                          sizeof (struct mn_socket), tcpser_sock_buf,
                          "tcpser_sock_pool");
+    SYSINIT_PANIC_ASSERT(rc == 0);
+
+    rc = tsuart_init();
     SYSINIT_PANIC_ASSERT(rc == 0);
 }

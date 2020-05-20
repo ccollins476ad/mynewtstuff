@@ -25,6 +25,32 @@ static struct os_mbuf *tsuart_rx_line;
 
 struct os_event tsuart_rx_ev;
 
+static struct os_eventq *tsuart_evq;
+
+struct os_eventq *
+tsuart_evq_get(void)
+{
+    return tsuart_evq;
+}
+
+void
+tsuart_evq_set(struct os_eventq *evq)
+{
+    tsuart_evq = evq;
+}
+
+#define BUFLOG_MAX_SZ 1024
+static uint8_t buflog[BUFLOG_MAX_SZ];
+int buflog_sz;
+
+static void
+buflog_add(uint8_t ch)
+{
+    if (buflog_sz < BUFLOG_MAX_SZ) {
+        buflog[buflog_sz++] = ch;
+    }
+}
+
 static inline int
 inc_and_wrap(int i, int max)
 {
@@ -155,6 +181,7 @@ tsuart_rx_char_event(struct os_event *ev)
 static int
 tsuart_rx_char(void *arg, uint8_t byte)
 {
+    buflog_add(byte);
     if (tsuart_ring_is_full(&tsuart_rx_cr)) {
         tsuart_rx_stalled = true;
         return -1;
@@ -163,7 +190,7 @@ tsuart_rx_char(void *arg, uint8_t byte)
     tsuart_ring_add_char(&tsuart_rx_cr, byte);
 
     if (!tsuart_rx_ev.ev_queued) {
-        os_eventq_put(os_eventq_dflt_get(), &tsuart_rx_ev);
+        os_eventq_put(tsuart_evq_get(), &tsuart_rx_ev);
     }
 
     return 0;
@@ -226,6 +253,8 @@ tsuart_init(void)
     if (tsuart_dev == NULL) {
         return SYS_ENODEV;
     }
+
+    tsuart_evq_set(os_eventq_dflt_get());
 
     return 0;
 }
