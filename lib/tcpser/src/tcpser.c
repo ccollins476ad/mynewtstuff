@@ -468,35 +468,21 @@ tcpser_rx_pkt(struct os_mbuf *om)
         cmdlen = om->om_len;
     }
 
-    console_printf("cmd=%*s\n", cmdlen, cmdstr);
-
     if (strncmp(cmdstr, "ack", cmdlen) == 0) {
         tcpser_unblock(0);
-        os_mbuf_free_chain(om);
-        return;
-    }
-
-    if (strncmp(cmdstr, "error", cmdlen) == 0) {
+    } else if (strncmp(cmdstr, "error", cmdlen) == 0) {
         tcpser_unblock(-1);
-        os_mbuf_free_chain(om);
-        return;
-    }
-
-    if (strncmp(cmdstr, "rx", cmdlen) == 0) {
+    } else if (strncmp(cmdstr, "accept", cmdlen) == 0) {
+        tcpser_rx_accept();
+    } else if (strncmp(cmdstr, "close", cmdlen) == 0) {
+        tcpser_rx_close();
+    } else if (strncmp(cmdstr, "rx", cmdlen) == 0) {
         os_mbuf_adj(om, cmdlen + 1);
         tcpser_rx_data(om);
-        return;
+        om = NULL;
     }
 
-    if (strncmp(cmdstr, "accept", cmdlen) == 0) {
-        tcpser_rx_accept();
-        return;
-    }
-
-    if (strncmp(cmdstr, "close", cmdlen) == 0) {
-        tcpser_rx_close();
-        return;
-    }
+    os_mbuf_free_chain(om);
 }
 
 int
