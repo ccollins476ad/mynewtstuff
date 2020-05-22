@@ -252,6 +252,7 @@ tcpser_listen(struct mn_socket *sock, uint8_t qlen)
 
     tcpser_start_op(&rc);
 
+    // XXX: Don't hardcode port.
     tsuart_write("listen 666\n", 11);
     tcpser_block();
 
