@@ -3,6 +3,7 @@
 #include "mn_socket/mn_socket_ops.h"
 #include "base64/base64.h"
 #include "console/console.h"
+#include "parse/parse.h"
 #include "tcpser_priv.h"
 
 STAILQ_HEAD(, os_mbuf_pkthdr) tcpser_rxq = STAILQ_HEAD_INITIALIZER(tcpser_rxq);
@@ -19,6 +20,7 @@ static os_membuf_t tcpser_sock_buf[
 
 static struct mn_socket *tcpser_sock;
 static struct mn_socket *tcpser_listener;
+static struct mn_sockaddr_in tcpser_peer_sin;
 
 static void
 tcpser_lock_op(void)
@@ -204,7 +206,9 @@ tcpser_connect(struct mn_socket *sock, struct mn_sockaddr *addr)
     already = tcpser_sock != NULL || tcpser_listener != NULL;
     if (!already) {
         tcpser_sock = sock;
+        tcpser_peer_sin = *sin;
     }
+
     tcpser_unlock_state();
 
     if (already) {
@@ -353,7 +357,20 @@ tcpser_getsockname(struct mn_socket *sock, struct mn_sockaddr *addr)
 static int
 tcpser_getpeername(struct mn_socket *sock, struct mn_sockaddr *addr)
 {
-    return MN_OPNOSUPPORT;
+    int rc;
+
+    tcpser_lock_state();
+
+    if (tcpser_sock == NULL) {
+        rc = MN_ENOTCONN;
+    } else {
+        memcpy(addr, &tcpser_peer_sin, sizeof tcpser_peer_sin);
+        rc = 0;
+    }
+
+    tcpser_unlock_state();
+
+    return rc;
 }
 
 static int
@@ -384,14 +401,53 @@ static const struct mn_socket_ops tcpser_ops = {
     .mso_itf_addr_getnext = tcpser_itf_addr_getnext,
 };
 
+static int
+tcpser_parse_peer_addr(char *addrstr, int len)
+{
+    char *c;
+    int portlen;
+    int rc;
+
+    c = strchr(addrstr, ':');
+    if (c == NULL) {
+        return MN_EINVAL;
+    }
+    *c = '\0';
+
+    rc = mn_inet_pton(MN_PF_INET, addrstr, &tcpser_peer_sin.msin_addr);
+    if (rc == 0) {
+        return MN_EINVAL;
+    }
+
+    // The string is not null-terminated.  Move the port segment back one
+    // characters to make room for a terminator.
+    portlen = addrstr + len - c - 1;
+    memmove(c, c + 1, portlen);
+    c[portlen] = '\0';
+
+    tcpser_peer_sin.msin_port = parse_ull_bounds(c, 0, UINT16_MAX, &rc);
+    if (rc != 0) {
+        return MN_EINVAL;
+    }
+    tcpser_peer_sin.msin_port = htons(tcpser_peer_sin.msin_port);
+
+    tcpser_peer_sin.msin_len = sizeof tcpser_peer_sin;
+    tcpser_peer_sin.msin_family = MN_PF_INET;
+
+    return 0;
+}
+
 static void
-tcpser_rx_accept(void)
+tcpser_rx_accept(char *addrstr, int len)
 {
     int rc;
 
     tcpser_lock_state();
 
     assert(tcpser_sock == NULL);
+
+    rc = tcpser_parse_peer_addr(addrstr, len);
+    assert(rc == 0);
 
     rc = mn_socket(&tcpser_sock, MN_PF_INET, MN_SOCK_STREAM, 0);
     assert(rc == 0);
@@ -474,7 +530,13 @@ tcpser_rx_pkt(struct os_mbuf *om)
     } else if (strncmp(cmdstr, "error", cmdlen) == 0) {
         tcpser_unblock(-1);
     } else if (strncmp(cmdstr, "accept", cmdlen) == 0) {
-        tcpser_rx_accept();
+        os_mbuf_adj(om, cmdlen + 1);
+
+        om = os_mbuf_pullup(om, OS_MBUF_PKTLEN(om));
+        // Not great to assert here, but better than ignoring the error.
+        assert(om != NULL);
+
+        tcpser_rx_accept((char *)om->om_data, om->om_len);
     } else if (strncmp(cmdstr, "close", cmdlen) == 0) {
         tcpser_rx_close();
     } else if (strncmp(cmdstr, "rx", cmdlen) == 0) {
