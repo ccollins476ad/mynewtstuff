@@ -21,6 +21,7 @@ static os_membuf_t tcpser_sock_buf[
 static struct mn_socket *tcpser_sock;
 static struct mn_socket *tcpser_listener;
 static struct mn_sockaddr_in tcpser_peer_sin;
+static int tcpser_listener_port = -1;
 
 static void
 tcpser_lock_op(void)
@@ -174,7 +175,26 @@ tcpser_close(struct mn_socket *sock)
 static int
 tcpser_bind(struct mn_socket *sock, struct mn_sockaddr *addr)
 {
-    return MN_OPNOSUPPORT;
+    const struct mn_sockaddr_in *sin;
+    int rc;
+
+    if (addr->msa_family != MN_PF_INET) {
+        return MN_EINVAL;
+    }
+
+    tcpser_lock_state();
+
+    if (tcpser_listener != NULL) {
+        rc = MN_EINVAL;
+    } else {
+        sin = (struct mn_sockaddr_in *)addr;
+        tcpser_listener_port = ntohs(sin->msin_port);
+        rc = 0;
+    }
+
+    tcpser_unlock_state();
+
+    return rc;
 }
 
 static int
@@ -240,31 +260,43 @@ tcpser_connect(struct mn_socket *sock, struct mn_sockaddr *addr)
 static int
 tcpser_listen(struct mn_socket *sock, uint8_t qlen)
 {
-    bool already;
+    char portstr[6];
+    int len;
     int rc;
 
     tcpser_lock_state();
-    already = tcpser_sock != NULL || tcpser_listener != NULL;
-    if (!already) {
+    if (tcpser_sock != NULL || tcpser_listener != NULL) {
+        rc = MN_ENOBUFS;
+    } else if (tcpser_listener_port == -1) {
+        rc = MN_EINVAL;
+    } else {
         tcpser_listener = sock;
+        rc = 0;
     }
     tcpser_unlock_state();
 
-    if (already) {
-        return MN_ENOBUFS;
+    if (rc != 0) {
+        return rc;
     }
 
     tcpser_start_op(&rc);
 
-    // XXX: Don't hardcode port.
-    tsuart_write("listen 666\n", 11);
+    len = snprintf(portstr, sizeof portstr, "%d", tcpser_listener_port);
+    assert(len < sizeof portstr);
+
+    tsuart_write("listen", 6);
+    tsuart_write(portstr, len);
+    tsuart_write("\n", 1);
+
     tcpser_block();
 
+    tcpser_lock_state();
     if (rc != 0) {
-        tcpser_lock_state();
         tcpser_listener = NULL;
-        tcpser_unlock_state();
+    } else {
+        tcpser_listener_port = -1;
     }
+    tcpser_unlock_state();
 
     tcpser_end_op();
 
